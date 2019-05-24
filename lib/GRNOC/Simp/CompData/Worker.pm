@@ -651,6 +651,7 @@ sub _do_scans {
             # Get the base oid to poll, (defaults to the original OID if no vars)
             my $base_oid = $scan_attr{map}{base_oid};
 
+            $self->logger->debug("Scanning base OID: $base_oid");
             # Callback to get the polling data for the base oid of the scan into results
             $cv->begin;
             $self->client->get(
@@ -788,6 +789,7 @@ sub _digest_scans {
 
         # Get the scans for the host
         my $scans = $results->{scan_tree}{$host};
+
         if ( scalar(keys %{$scans}) < 1 ) {
             $self->logger->error("There is no scan data for $host!");
             next;
@@ -1176,6 +1178,21 @@ sub _digest_vals {
 }
 
 
+sub _use_data_vars {
+    my $self      = shift;
+    my $data      = shift;
+    my $data_vars = shift;
+    my $in_string = shift;
+
+    for my $var (split(/,|, /, $data_vars)) {
+        if (exists $data->{$var}) {
+            $in_string =~ s/\Q$var\E/$data->{$var}/g;
+        }
+    }
+    return $in_string;
+}
+
+
 # Applies functions to values gathered by _do_vals
 sub _do_functions {
 
@@ -1251,8 +1268,25 @@ sub _do_functions {
                             last;
                         }
 
-                        my $operand = $fctn->getAttribute("value");
-                        my $val     = $_FUNCTIONS{$fid}([$data->{$val_id}], $operand, $fctn, $data, $results, $host);
+                        my $operand   = $fctn->getAttribute("value");
+                        my $repl_with = $fctn->getAttribute("with");
+                        my $use_data = $fctn->getAttribute("use");
+
+                        if (defined $use_data) {
+                            $operand = $self->_use_data_vars($data,$use_data,$operand);
+                            if (defined $repl_with) {
+                                $repl_with = $self->_use_data_vars($data,$use_data,$repl_with);
+                            }
+                        }
+
+                        
+                        my $val;
+                        if (!defined $repl_with) {
+                            $val = $_FUNCTIONS{$fid}([$data->{$val_id}], $operand, $fctn, $data, $results, $host);
+                        }
+                        else {
+                            $val = $_FUNCTIONS{$fid}([$data->{$val_id}], $operand, $repl_with, $data, $results, $host);
+                        }
 
                         if ( defined $val ) {
                             # Assign the computed val back to the data object for the val_id
@@ -1266,7 +1300,7 @@ sub _do_functions {
         $results->{final}{$host} = $results->{val}{$host};
     }
     $self->logger->debug("Finished applying functions to the data");
-    #$self->logger->debug(Dumper($results->{final}));
+    #$self->logger->debug("FINAL RESULTS:\n" . Dumper($results->{final}));
     $cv->end;
 }
 
@@ -1382,9 +1416,8 @@ sub _do_functions {
 	}
     },
     'replace' => sub { # regular-expression replace
-        my ($vals, $operand, $elem) = @_;
+        my ($vals, $operand, $replace_with) = @_;
 	foreach my $val (@$vals){
-	    my $replace_with = $elem->getAttribute("with");
 	    $val = Data::Munge::replace($val, $operand, $replace_with);
 	    return [$val];
 	}
