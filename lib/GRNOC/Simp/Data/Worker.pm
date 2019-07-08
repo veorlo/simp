@@ -576,6 +576,11 @@ sub _get_rate{
         next;
       }
 
+      # Fix for data spikes: Skip if value is over 1T
+      if ($current_val > 1000000000000) {
+        next;
+      }
+
       $results{$ip}{$oid}{'value'} = $self->_rate($current_val,$current_ts,
 						  $previous_val,$previous_ts,
 						  "$ip->$oid");
