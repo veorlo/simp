@@ -950,24 +950,20 @@ sub _get_data {
                 # val hash under its val ID
                 my $val_key = $results->{'var_map'}->{$elem->{'source'}};
 
-                if ($val_key) {
-                    $self->logger->debug("Getting data for source $elem->{'source'} from the $val_key values");
+                for my $host (@$hosts) {
 
-                    for my $host (@$hosts) {
+                    # Assign the OID suffix data
+                    if (exists $results->{'scan_vals'}{$host}{$elem->{'source'}}) {
+                        my $suffix_data = $results->{'scan_vals'}{$host}{$elem->{'source'}};
 
-                        # Assign oid node values to the data name
-                        if (exists $results->{'scan_vals'}{$host}{$elem->{'source'}}) {
-                            my $suffix_data = $results->{'scan_vals'}{$host}{$elem->{'source'}};
-
-                            for my $key (keys %$suffix_data) {
-                                $results->{'data'}{$host}{$elem->{'name'}}{$key}{'value'} = $suffix_data->{$key}{'suffix'};
-                            }
+                        for my $key (keys %$suffix_data) {
+                            $results->{'data'}{$host}{$elem->{'name'}}{$key}{'value'} = $suffix_data->{$key}{'suffix'};
                         }
+                    }
 
-                        # Assign retrieved values from the scan to the data name
-                        if (exists $results->{'scan_vals'}{$host}{$val_key}) {
-                            $results->{'data'}{$host}{$elem->{'name'}} = $results->{'scan_vals'}{$host}{$val_key};
-                        }
+                    # Assign the poll_value
+                    if ($val_key && exists $results->{'scan_vals'}{$host}{$val_key}) {
+                        $results->{'data'}{$host}{$elem->{'name'}} = $results->{'scan_vals'}{$host}{$val_key};
                     }
                 }
             }
