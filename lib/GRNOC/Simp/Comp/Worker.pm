@@ -473,6 +473,7 @@ sub _map_oid {
 
 # Transforms OID values and data into a hash tree, preserving OID element dependencies
 sub _transform_oids {
+
     my $self = shift;
     my $oids = shift;
     my $data = shift;
@@ -513,12 +514,25 @@ sub _transform_oids {
         my @split_oid = split(/\./, $oid);
 
         # Check if the last var happens before the end of the data OID elements
+        my $postvar_suffix = 0;
         if (defined $map->{'last_var'} && $map->{'last_var'} < $#split_oid) {
 
+            $postvar_suffix = 1;
+
+            my $test = $split_oid[$map->{'last_var'}+1, $#split_oid];
+            my $ctrl = @{$map->{'split_oid'}}[$map->{'last_var'}+1, $#{$map->{'split_oid'}}];
+
+            if ($ctrl != $test) {
+                #$self->logger->debug("\n",Dumper($test), Dumper($ctrl));
+                next;
+            }
+            else {
+                $self->logger->debug("FOUND A GOOD OID!: $oid");
+            }
             # Combine any tailing elements in the OID with the last var
-            my $var_tail =
-              join('.', splice(@split_oid, $map->{'last_var'}, $#split_oid));
-            push(@split_oid, $var_tail);
+            #my $var_tail = join('.', splice(@split_oid, $map->{'last_var'}, $#split_oid));
+            #push(@split_oid, $var_tail);
+            #splice(@split_oid, $map->{'last_var'}, $#split_oid);
         }
 
         # Make a reference point to the base of %vals
@@ -553,27 +567,45 @@ sub _transform_oids {
 
                 # On the last key (leaf), assign the data
                 if ($i == $#split_oid) {
-                    $ref->{$oid_elem} = $value;
-                    $ref->{$oid_elem}{'suffix'} = $oid_elem;
+                    if (!$postvar_suffix) {
+                        $ref->{$oid_elem} = {
+                            #$map->{'name'} => $value->{'value'},
+                            'time'         => $value->{'time'},
+                            'value'        => $value->{'value'},
+                            'suffix'       => $oid_elem
+                        };
+                    }
+                    else {
+                        #$ref->{$map->{'name'}} = $value->{'value'};
+                        $ref->{'value'} = $value->{'value'};
+                        if (!exists $ref->{'time'}) {
+                            $ref->{'time'} = $value->{'time'};
+                        }
+                        if ($is_scan) {
+                            $ref->{$var} = $oid_elem;
+                        }
+                    }
                 }
-
                 # Otherwise init a new hash in that key for another var
                 # and set it in val results
-                else {
-                    $ref->{$oid_elem} = {};
-                }
+                elsif (!$postvar_suffix || $i <= $map->{'last_var'}) {
 
-                # Always assign blank hashes to elems in the blanks hash tree
-                if ($is_scan) {
-                    $blank_ref->{$oid_elem} = {};
+                    $ref->{$oid_elem} = {};
+                
+                    # Always assign blank hashes to elems in the blanks hash tree
+                    if ($is_scan) {
+                        $blank_ref->{$oid_elem} = {};
+                    }
                 }
             }
 
-            # Switch the reference point to the elem's new hash
-            $ref = $ref->{$oid_elem};
+            if (!$postvar_suffix || $i <= $map->{'last_var'}) {
+                # Switch the reference point to the elem's new hash
+                $ref = $ref->{$oid_elem};
 
-            if ($is_scan) {
-                $blank_ref = $blank_ref->{$oid_elem};
+                if ($is_scan) {
+                    $blank_ref = $blank_ref->{$oid_elem};
+                }
             }
         }
 
@@ -649,6 +681,7 @@ sub _get_scans {
 
         # Add a map of the scan OID to our scan attributes
         $scan->{'map'} = $self->_map_oid($scan);
+        $scan->{'map'}{'name'} = $scan->{'poll_value'};
 
         if (!defined $scan->{'map'}) {
             $self->logger->error("A map could not be generated for scan $scan->{'oid_suffix'}!");
@@ -700,6 +733,7 @@ sub _scan_cb {
     $self->logger->debug("Running _scan_cb for $scan_suffix");
 
     for my $host (@$hosts) {
+
         if (!$data->{$host}) {
             $self->logger->error("No scan data could be retrieved for $host in callback for $scan_oid");
 
@@ -725,9 +759,7 @@ sub _scan_cb {
             # Skip the OID if the host is exclusion only and
             # is using target matches or the value matches a target
             if ($exclude_only) {
-                next
-                  unless (!$has_targets
-                    || (any { $scan_oid =~ /$_/ } @$targets));
+                next unless (!$has_targets || (any { $scan_oid =~ /$_/ } @$targets));
             }
 
             # If we didn't exclude the oid, add it to our OIDs to translate
@@ -744,15 +776,14 @@ sub _scan_cb {
             # Transform the OID data into an OID tree with empty leaves to fill
             my $scan_transform = $self->_transform_oids(\@oids, $data->{$host}, $scan_map, 'scan');
 
+            $self->logger->debug(Dumper($scan_transform));
+
             # Set scan_tree with the blank OID tree and legend from the scan
-            $results->{'scan_tree'}{$host}{$scan_suffix}{'vals'} =
-              $scan_transform->{'blanks'};
-            $results->{'scan_tree'}{$host}{$scan_suffix}{'legend'} =
-              $scan_transform->{'legend'};
+            $results->{'scan_tree'}{$host}{$scan_suffix}{'vals'}   = $scan_transform->{'blanks'};
+            $results->{'scan_tree'}{$host}{$scan_suffix}{'legend'} = $scan_transform->{'legend'};
 
             # Set scan_vals to the tree of values from the scan
-            $results->{'scan_vals'}{$host}{$scan_suffix} =
-              $scan_transform->{'vals'};
+            $results->{'scan_vals'}{$host}{$scan_suffix} = $scan_transform->{'vals'};
         }
     }
 
@@ -962,7 +993,7 @@ sub _get_data {
                     }
 
                     # Assign the poll_value
-                    if ($val_key && exists $results->{'scan_vals'}{$host}{$val_key}) {
+                    elsif ($val_key && exists $results->{'scan_vals'}{$host}{$val_key}) {
                         $results->{'data'}{$host}{$elem->{'name'}} = $results->{'scan_vals'}{$host}{$val_key};
                     }
                 }
@@ -983,10 +1014,9 @@ sub _get_data {
             # Add the element's name to the val_map
             $elem->{'map'}{'name'} = $elem->{'name'};
 
-            $self->logger->debug(Dumper($elem->{map}));
-
             # Get the base OID of the val for polling
             my $base_oid = $elem->{'map'}{'base_oid'};
+
 
             for my $host (@$hosts) {
                 if (scalar(keys %{$results->{'scan_tree'}{$host}}) < 1) {
@@ -1084,7 +1114,11 @@ sub _data_cb {
     }
 
     # Get the transformed data for the val using the wanted OIDs
+    $self->logger->debug(Dumper(\@oids), Dumper($data->{$host}), Dumper($elem_map));
     my $val_data = $self->_transform_oids(\@oids, $data->{$host}, $elem_map);
+    $self->logger->debug(Dumper($val_data));
+    #$self->logger->debug("EARLY EXIT") and die;
+
     $self->logger->debug("Translated raw val data into data tree for $elem_map->{'name'}");
 
     # Check translated data, removing leaves and branches that were not wanted
@@ -1106,13 +1140,20 @@ sub _build_data {
     my $val_tree  = shift;
     my $data_tree = shift;
 
+    $self->logger->debug(Dumper($val_tree));
+    $self->logger->debug(Dumper($data_tree));
+
     # Check if our data tree reference is a leaf on the tree
     # if ( ref($data_tree) eq ref({}) &&
     #      (!keys $data_tree || exists $data_tree->{'time'}) ) {
     if (exists $data_tree->{'time'} || !scalar(%{$data_tree})) {
 
+        $self->logger->debug("_build_data hit a leaf!");
+
         # Ensure that we have a value to add to the leaf
         if (exists $val_tree->{'value'}) {
+
+            $self->logger->debug('_build_data hit a leaf with a value!');
 
             # Set the value for the val
             $data_tree->{$val_id} = $val_tree->{'value'};
@@ -1127,6 +1168,10 @@ sub _build_data {
                 }
             }
         }
+        else {
+            $self->logger->debug('_build_data hit a leaf with NO VALUE: '. Dumper($data_tree));
+        }
+        $self->logger->debug(Dumper($data_tree));
     }
     else {
         # Loop over the all the relevant keys of the data tree
@@ -1175,7 +1220,9 @@ sub _digest_data {
     my $results   = shift;    # Request-global $results hash
     my $cv        = shift;    # Assumes that it's been begin()'ed with a callback
 
-    $self->logger->debug("Digesting vals");
+    $self->logger->debug("Digesting data");
+
+    #$self->logger->debug(Dumper($results->{'data'})) and $self->logger->debug('EARLY EXIT') and die;
 
     # Get the array of hosts from params
     my $hosts = $params->{'node'}{'value'};
@@ -1187,9 +1234,6 @@ sub _digest_data {
     my $value_data = $composite->get('/composite/data/value');
     my $meta_data  = $composite->get('/composite/data/meta');
 
-    # TODO: it's possible that a composite doesn't have values or metadata
-    #       defined. But should it?
-    # there are some defined like that which causes this check to be required.
     push(@data_elements, @$value_data) if ($value_data);
     push(@data_elements, @$meta_data)  if ($meta_data);
 
@@ -1206,18 +1250,19 @@ sub _digest_data {
 
         # Get the vals polled for the host
         my $vals = $results->{'data'}{$host};
-
-        #$self->logger->debug(Dumper($vals));
+        $self->logger->debug(Dumper($vals));
 
         # Add the data for all vals to the appropriate leaves of val_tree
         for my $val_id (keys %{$vals}) {
             $self->logger->debug("Building data for $val_id");
+
             $self->_build_data($val_id, $vals->{$val_id}, $val_tree);
 
-            $self->logger->debug("\nVAL_ID: $val_id" . "\nVALS: " . Dumper($vals->{val_id}) . "\nVAL TREE: " . Dumper($val_tree));
+            $self->logger->debug("\nVAL_ID: $val_id" . "\nVALS: " . Dumper($vals->{$val_id}) . "\nVAL TREE: " . Dumper($val_tree));
         }
 
         $self->logger->debug("Finished building val data");
+        $self->logger->debug(Dumper($val_tree)) and die;
 
         # Construct the final, flattened data array from the completed val_tree
         my @val_data;
@@ -1238,18 +1283,16 @@ sub _digest_data {
                 my $data_el_name = $data_element->{'name'};
 
                 $val_datum->{$data_el_name} = undef
-                  if (!exists($val_datum->{$data_el_name}));
+                if (!exists($val_datum->{$data_el_name}));
 
                 if (exists($data_element->{'require_match'})) {
-                    my $inverted =
-                      exists($data_element->{'invert_match'})
-                      ? $data_element->{'invert_match'}
-                      : 0;
+
+                    my $inverted = exists($data_element->{'invert_match'}) ? $data_element->{'invert_match'} : 0;
+                    
                     my $match = $val_datum->{$data_el_name} =~ $data_element->{'require_match'};
 
                     if ((!$match && !$inverted) || ($match && $inverted)) {
                         splice(@val_data, $i, 1);
-
                         last;
                     }
                 }
@@ -1309,14 +1352,12 @@ sub _do_conversions {
         if (!$results->{'data'}{$host}
             || (ref($results->{'data'}{$host}) ne ref([]))) {
             $self->logger->error("ERROR: No data array was generated for $host!");
-
             next;
         }
 
         # Set final values if no functions are being applied to the hosts's data
         unless ($conversions) {
             $results->{'final'}{$host} = $results->{'data'}{$host};
-
             next;
         }
 
