@@ -402,6 +402,7 @@ sub _trim_data {
 sub _map_oid {
     my $self     = shift;
     my $oid_attr = shift;
+    my $var_map  = shift || {};
     my %oid_map;
 
     # Init the base OID for polling as the original OID
@@ -438,6 +439,11 @@ sub _map_oid {
             # dependency derived from its var_num
             $oid_map{'vars'}{$oid_elem}{'index'} = $i;
 
+            if (exists $var_map->{$oid_elem}) {
+                $self->logger->debug("DIS ELEMENT BE A POLL VALUE: $oid_elem");
+                $oid_map{'vars'}{$oid_elem}{'value'} = 1; 
+            }
+
             if (!defined $first_var_idx) {
 
                 # Set the index where the first variable occurs
@@ -462,8 +468,12 @@ sub _map_oid {
         # The .* is appended or simp-data will match any OID suffix starting
         # with that num
         # i.e. (1.2.3.1 would get 1.2.3.10, 1.2.3.17, 1.2.3.108, etc.)
-        $oid_map{'base_oid'} =
-          (join '.', @split_oid[0 .. ($first_var_idx - 1)]) . '.*';
+        $oid_map{'base_oid'} = (join '.', @split_oid[0 .. ($first_var_idx - 1)]) . '.*';
+    }
+
+    if (defined $oid_map{'last_var'} && $oid_map{'last_var'} < $#split_oid) {
+        # Flag to indicate an OID has suffix nodes past the last variable
+        $oid_map{'postvar_suffix'} = 1;
     }
 
     # $self->logger->debug("Generated map for $oid_attr->{'id'}:\n" .
@@ -493,6 +503,16 @@ sub _transform_oids {
 
     my @legend;    # Store vars in order of parent->child
 
+    # Check the map for poll_values as oid_elements
+    my $poll_vals = 0;
+    if (exists $map->{vars}) {
+        for my $var (keys %{$map->{'vars'}}) {
+            if (exists $var->{'value'}) {
+                $poll_vals = 1;
+            }
+        }
+    }
+
     for my $oid (@{$oids}) {
 
         # Get the OID's returned value from polling
@@ -513,11 +533,10 @@ sub _transform_oids {
         my @split_oid = split(/\./, $oid);
 
         # Check if the last var happens before the end of the data OID elements
-        if (defined $map->{'last_var'} && $map->{'last_var'} < $#split_oid) {
+        if (exists $map->{'postvar_suffix'}) {
 
             # Combine any tailing elements in the OID with the last var
-            my $var_tail =
-              join('.', splice(@split_oid, $map->{'last_var'}, $#split_oid));
+            my $var_tail = join('.', splice(@split_oid, $map->{'last_var'}, $#split_oid));
             push(@split_oid, $var_tail);
         }
 
@@ -530,7 +549,7 @@ sub _transform_oids {
             $blank_ref = $trans{'blanks'};
         }
 
-        # Starting from the 1st var, loop over OID elements
+        # Starting from the 1st var, loop over the OID's elements
         for (my $i = $map->{'first_var'}; $i <= $#split_oid; $i++) {
 
             # Get any matching var from the map's split OID
@@ -606,11 +625,8 @@ sub _get_scans {
         push @{$exclude_patterns{$1}}, $2;
     }
 
-    # --- This function will execute multiple scans in "parallel"
-    # using the begin/end approach
-
+    #--- This function will execute multiple scans in parallel using the begin/end approach
     #--- We use $cv to signal when all those scans are done
-
     #--- these should be moved to the constructor
 
     # Make sure several root hashes exist
@@ -648,7 +664,7 @@ sub _get_scans {
         }
 
         # Add a map of the scan OID to our scan attributes
-        $scan->{'map'} = $self->_map_oid($scan);
+        $scan->{'map'} = $self->_map_oid($scan, $results->{'var_map'});
 
         if (!defined $scan->{'map'}) {
             $self->logger->error("A map could not be generated for scan $scan->{'oid_suffix'}!");
@@ -725,9 +741,7 @@ sub _scan_cb {
             # Skip the OID if the host is exclusion only and
             # is using target matches or the value matches a target
             if ($exclude_only) {
-                next
-                  unless (!$has_targets
-                    || (any { $scan_oid =~ /$_/ } @$targets));
+                next unless (!$has_targets || (any { $scan_oid =~ /$_/ } @$targets));
             }
 
             # If we didn't exclude the oid, add it to our OIDs to translate
@@ -808,9 +822,7 @@ sub _digest_scans {
             $self->logger->debug("Single scan found, using that scan");
 
             for my $scan_id (keys %{$scans}) {
-                $results->{'scan_tree'}{$host} =
-                  $results->{'scan_tree'}{$host}{$scan_id};
-
+                $results->{'scan_tree'}{$host} = $results->{'scan_tree'}{$host}{$scan_id};
                 last;
             }
 
@@ -1101,6 +1113,7 @@ sub _data_cb {
 
 # Adds all value leaves of a val_tree to the data_tree's hash leaves
 sub _build_data {
+
     my $self      = shift;
     my $val_id    = shift;
     my $val_tree  = shift;
@@ -1127,6 +1140,10 @@ sub _build_data {
                 }
             }
         }
+        else {
+            $self->logger->debug('_build_data hit a leaf with NO VALUE: '. Dumper($val_tree));
+        }
+        $self->logger->debug(Dumper($data_tree));
     }
     else {
         # Loop over the all the relevant keys of the data tree
@@ -1867,6 +1884,18 @@ sub _bool_to_int {
         my $a     = pop @$stack;
         my $res =
             (defined($a)  && defined($b))  ? ($a == $b)
+          : (!defined($a) && !defined($b)) ? 1
+          :                                  0;
+        push @$stack, _bool_to_int($res);
+    },
+
+    # a b => (is string A equal to string B? (or both undef))
+    'eq' => sub {
+        my $stack = shift;
+        my $b     = pop @$stack;
+        my $a     = pop @$stack;
+        my $res =
+            (defined($a)  && defined($b))  ? ($a eq $b)
           : (!defined($a) && !defined($b)) ? 1
           :                                  0;
         push @$stack, _bool_to_int($res);
